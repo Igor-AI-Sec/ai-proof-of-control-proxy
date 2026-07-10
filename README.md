@@ -1,47 +1,38 @@
-Title: I built a tool to prove my AI redaction logs weren't tampered with. It doesn't prove the redaction worked.
+# LLM Prompt Sanitizer with Hash-Chained, Signed Logging (Prototype)
 
-Subtitle: A hash-chained signature system, broken on purpose to see if it would notice — and the harder problem hiding underneath.
-
----
-
-Anyone who has put real users in front of an LLM has had this thought at 2am: someone is going to paste a customer's SSN, or their own, straight into a prompt. You can tell people not to. They will anyway.
-
-So I built something small: a script that sits between a prompt and the model, strips out anything that looks like an SSN, email, phone number, IBAN, or card number, and — this is the part I actually cared about — signs and logs what it did, in a way you could later prove wasn't quietly edited afterward.
-
-I built it. It works. Then I tried to break it on purpose, and that's where it got interesting.
+A small Python prototype exploring one idea: before a user prompt reaches an LLM, strip out common PII, then produce a tamper-evident, signed log of what was sent — one you can independently re-verify later.
 
 ## What it actually does
 
-Nothing exotic. Five regex patterns catch the obvious shapes of PII and replace them with `[REDACTED_X]`. Each redacted prompt gets hashed, and each hash gets folded into the previous one — a chain, the same basic idea a git history or a ledger uses. The chain is signed with an Ed25519 key, loaded from disk so it persists across runs instead of resetting every time. A separate function walks the whole log afterward and tells you if anything broke.
+1. **Redacts PII via regex**: US-format SSNs, email addresses, international phone numbers, IBANs, and credit-card-shaped digit sequences. This is deterministic pattern matching, not NLP — it will miss names, physical addresses, and anything that doesn't match these shapes, and it will occasionally flag things that aren't PII.
+2. **Hashes and chains** each log entry: every entry's hash includes the previous entry's hash, so editing, deleting, or reordering any past entry breaks the chain from that point forward.
+3. **Signs** each entry with a persistent Ed25519 keypair (generated once, then loaded from disk on subsequent runs).
+4. **Verifies**: `verify_log()` walks the whole file, recomputes every hash, and checks every signature. Tested by deliberately corrupting a log entry — the tool correctly reports the break and the exact line.
 
-## The test: I tried to lie to my own log
+## What this proves, and what it doesn't
 
-The obvious question for anything claiming "tamper-evident" is whether it actually notices tampering, or just says it does.
+- **Proves**: if `verify_log()` passes, no entry in the log has been added, removed, reordered, or edited since it was written — that's a real, tested guarantee, not just an aspiration.
+- **Does not prove**: that "no sensitive data reached the model." Redaction only catches the patterns listed above; anything outside that shape passes through untouched. Broader coverage would need an NLP-based detector (e.g. Presidio) — this doesn't replace one.
+- **Is not** a network middleware or proxy — it's a Python class called in-process. There's no traffic interception here (yet).
 
-So I ran the script twice — two separate runs, loading the same key from disk both times, the way it would work in real use — producing four log entries. Then I opened the log file directly and edited one line in the middle: appended a few words to an already-logged prompt, the kind of quiet edit someone might make if they realized afterward they'd logged something they shouldn't have.
+## What this is not
 
-Ran the verifier. `Chain broken at line 2.` Caught immediately, and it named the exact line.
+This is a prototype exploring one small, real piece of a bigger problem (PII in LLM prompts + tamper-evident logging), not a compliance product. It does not implement, satisfy, or certify compliance with the EU AI Act, the CSA AI Controls Matrix, or any other regulatory framework — no single script can, and claiming otherwise would be dishonest. If you're working toward actual compliance, "redact → hash-chain → sign → verify" is one honest building block among many you'd need, not a solution.
 
-That's a lower bar than it sounds like, and I want to be honest about why it's not nothing either. A single signature on a single entry only ever proves that one entry wasn't changed after signing — it says nothing if someone deletes an entire earlier entry and leaves the rest alone. Chaining is the part that closes that gap: touch anything, and every entry downstream stops verifying. That's the actual claim now, tested instead of asserted.
+## Security note
 
-## What this doesn't prove — and this is the part that matters more
+`signing_key.raw` is generated locally and **must never be committed to version control** — anyone holding it could forge validly-signed entries. Add it to `.gitignore` before pushing. In anything beyond a local prototype, keys belong in a proper KMS/secrets manager, not a flat file.
 
-Here's the twist I didn't expect going in.
+## Ideas for extending this
+- Swap the regex layer for a real NLP-based PII detector
+- Move key storage to a KMS
+- Add a small CLI wrapper instead of calling the class directly
 
-A clean pass from the verifier tells you the log wasn't touched after it was written. It tells you *nothing* about whether the redaction step upstream caught everything it should have.
+## How to run
+```
+pip install -r requirements.txt
+python sanitizer_proxy.py
+```
 
-My five patterns catch a US Social Security Number, an email, a phone number, an IBAN, a card-shaped run of digits. They do not catch a name. They do not catch "the guy who lives on Rosenstraße." They do not catch anything shaped slightly differently than I guessed. Regex matches shape, not meaning — that's the entire limitation of the approach, and no amount of hashing or signing touches it.
-
-So you can have a perfectly verified, perfectly tamper-evident log of a prompt that still contains someone's home address, sitting right there in plain text, cryptographically signed and provably untouched since the moment it was written. The signature proves the wrong thing looks fine. It was never built to check the right thing.
-
-It's the same shape of problem as checking whether a link is alive versus whether the page behind it says what was claimed. Verifying *that something happened as recorded* is a much easier problem than verifying *that the right thing happened in the first place*. I built the easy half first, because it's the half you can actually test by trying to break it. The hard half needs a real PII detector — the kind of NLP-based tool (Presidio and similar) that understands context, not just shape — and that's a different, much bigger project than a weekend script.
-
-## What I'm not claiming
-
-No regulatory framework gets satisfied by a personal script, and I'm not going to pretend otherwise here. This doesn't make anything "EU AI Act compliant" or map cleanly onto any control framework — compliance is an organizational and legal outcome, not a side effect of importing a crypto library. What it is: a small, honestly-scoped demonstration that hash-chained signing is a real, checkable way to make a log tamper-evident, and a reminder to myself that tamper-evidence and correctness are two completely different guarantees that are easy to blur together in a README.
-
-## In the end
-
-I set out to build a small proof that a log wasn't touched after the fact. I got that, and I tested it hard enough to actually believe it. What I didn't get — and didn't set out to get, which is exactly the problem — is any proof that the thing being logged was safe in the first place. Tamper-evidence and correctness sound like they pull in the same direction. They don't. One's a lock on the door; the other is knowing what's in the room. I only built the lock.
-
-Code's on [GitHub](https://github.com/Igor-AI-Sec/ai-proof-of-control-proxy), including the exact steps to reproduce the tampering test above. Fork it, break it worse than I did, tell me what I missed.
+## License
+MIT
