@@ -1,2 +1,7 @@
 audit_trail.jsonl
 signing_key.raw
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
